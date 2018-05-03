@@ -1,0 +1,711 @@
+---
+title: "INFO 550 Final Project- Shaily Krishan"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+## Install the required package with:
+## install.packages("RSocrata")
+## Reference: https://dev.socrata.com/foundry/data.medicare.gov/eqxu-aw4f
+
+library("RSocrata")
+
+# Reading in the "Dialysis Facility Compare"" data
+dfc.df <- read.socrata(
+  "https://data.medicare.gov/resource/eqxu-aw4f.json",
+  app_token = "a2pVgaK9QKjxN5iNc4DLohtjI",
+  email     = "shells.27@gmail.com",
+  password  = "MCh@nge2018",
+  stringsAsFactors = FALSE
+)
+```
+# Reading in "ESRD QIP - Complete QIP Data - Payment Year 2018" data
+```{r}
+esrdqip.df <- read.socrata(
+  "https://data.medicare.gov/resource/m26r-4ib8.json",
+  app_token = "a2pVgaK9QKjxN5iNc4DLohtjI",
+  email     = "shells.27@gmail.com",
+  password  = "MCh@nge2018",
+  stringsAsFactors = FALSE
+)
+```
+# Reading in "Patient survey (ICH CAHPS)" data
+```{r}
+patsurvey.df <- read.socrata(
+  "https://data.medicare.gov/resource/rza3-mnpj.json",
+  app_token = "a2pVgaK9QKjxN5iNc4DLohtjI",
+  email     = "shells.27@gmail.com",
+  password  = "MCh@nge2018",
+  stringsAsFactors = FALSE
+)
+```
+# Create dataframe with selected DFC variables
+```{r}
+library(dplyr)
+dfc <- dfc.df %>% select(provider_number,facility_name,network,address_line_1,
+                         city,state,zip,chain_owned,five_star,
+                         X_of_dialysis_stations,mortality_rate_facility,
+                         readmission_rate_facility,
+                         standardized_hospitalization_ratio,
+                         standardized_readmission_ratio,
+                         standard_infection_ratio)
+```
+# Create dataframe with selected ESRDQIP variables
+```{r}
+library(dplyr)
+esrdqip <- esrdqip.df %>% select(cms_certification_number_ccn,
+                                 strr_measure_score,total_performance_score,
+                                 nhsn_bsi_measure_score,
+                                 kt_v_dialysis_adequacy_combined_measure_score,
+                                 anemia_management_measure_score,
+                                 vascular_access_combined_measure_score,
+                                 mineral_metabolism_measure_score)
+
+```
+# Create dataframe with selected Patient survey variables
+```{r}
+patsurvey <- patsurvey.df %>% select(provider_number, starts_with("top_box"))
+names(patsurvey) <- gsub("top_box_percent_of_patients_","",names(patsurvey))
+```
+# Reading in Dialysis Facility Report file
+```{r}
+library(readr)
+setwd("~/INFO 550/Project/Files")
+dfr <- read_delim("DFR_Data_FY2017.csv", delim = ",")
+
+# Selecting demographic, ESRD cause, Transplant variables from DFR
+fac_demo <- select(dfr,provfs,rac1y4_f,
+                   rac2y4_f,rac3y4_f,rac4y4_f,rac5y4_f,eth1y4_f,
+                   eth2y4_f,eth3y4_f,sexy4_f,agey4_f,dis1y4_f,dis2y4_f,
+                   dis3y4_f,dis4y4_f,rdsallty4_f,txally4_f)
+
+# Create data frame from DFR variables
+fac_demo1 <- data.frame(fac_demo)
+```
+# Join data frames
+```{r}
+# DFC + DFR data
+df1 <- left_join (dfc,fac_demo1, by=c("provider_number"="provfs"))
+# ESRDQIP + Patsurvey data
+df2 <- left_join(patsurvey,esrdqip,
+                 by=c("provider_number"="cms_certification_number_ccn"))
+# DFC + DFR + ESRDQIP + Patsurvey data
+allfacdata <- left_join(df1,df2,by=c("provider_number"="provider_number"))
+
+# Conversion of rate & measure variables to numeric
+# Columns 9 through 44 are rate/ measure variables which will be converted to numeric, columns 1 though 8 are retained as character variables)
+allfac <- data.frame(allfacdata[,1:8], sapply(allfacdata[,9:44], function(x) as.numeric(x)))
+```
+# Adding zipcode xy coordinates 
+```{r}
+library(dplyr)
+# Install "zipcode" package
+library(zipcode)
+data("zipcode")
+# Select columns from zipcode 
+zipcoord <- zipcode %>% select(zip,longitude,latitude)
+# Join zip code data
+geo_join <- left_join(allfac, zipcoord, by=c("zip"="zip"))
+```
+# Using SQLite to import CKD prevalence data
+```{r}
+# Set working directory to location of database
+setwd("C:/Users/shail")
+# load libraries
+library(DBI)
+library(RSQLite)
+
+con <- dbConnect(RSQLite::SQLite(),dbname="CKD_Prevalence.db")
+# Show tables in database
+dbListTables(con)
+# Show types of prevalence measures
+dbGetQuery(con,"select distinct DataValueTypeID from CKD_prev")
+# Get Crude prevalence values for each state into a dataframe
+ckd_prev <- dbGetQuery(con,"select LocationAbbr,avg(DataValue) from CKD_prev 
+                       where DataValueTypeID='CrdPrev' and 
+                       Question like '%kidney%' and 
+                       YearStart='2016' group by LocationAbbr")
+dbDisconnect(con)
+```
+# Join Prevalence data
+```{r}
+library(dplyr)
+alldata <- left_join(geo_join,ckd_prev,by=c("state"="LocationAbbr"))
+```
+# Creating categories in continuous variables
+```{r}
+# Variable 'perfcats' for Facility performance score categories
+alldata$perfcats <- cut(alldata$total_performance_score,
+                         breaks = quantile(alldata$total_performance_score,na.rm = TRUE),
+                         labels=c("Poor","Fair","Good","Very good"),include.lowest=TRUE)
+
+# Variable 'facrating' for patient's rating of Dialysis facilities
+alldata$facrating <- cut(alldata$rating_of_the_dialysis_facility,
+                         breaks = quantile(alldata$rating_of_the_dialysis_facility,na.rm = TRUE),
+                         labels=c("Poor","Fair","Good","Very good"),
+                         include.lowest=TRUE)
+
+# Variable 'stations' for number of dialysis stations categories
+alldata$stations <- cut(alldata$X_of_dialysis_stations,breaks=c(0,mean(alldata$X_of_dialysis_stations),max(alldata$X_of_dialysis_stations)),c("up to 17","17 to 80"))
+
+# Make 'five_star' a factor 
+alldata$five_star <- factor(alldata$five_star)
+```
+# Exploratory analysis
+```{r}
+library(ggplot2)
+library(dplyr)
+# Number of facilities in networks
+# Networks 6,14,9 are largest networks- they have top 3 highest number of facilities
+alldata %>% group_by(network) %>% summarize(total=n()) %>% arrange(desc(total))
+# Number of facilities in networks, by chain status
+# Most facilities are chain owned
+alldata %>% ggplot(aes(x=network)) + 
+  geom_bar(aes(fill=chain_owned),stat="count") + 
+  ggtitle("Network facilities by chain status")
+# Total performance score in networks
+alldata %>% ggplot(aes(x=network)) + 
+  geom_bar(aes(fill=perfcats),stat="count") + 
+  ggtitle("Total performance scores in network facilities")
+summary(alldata$perfcats)
+```
+# Mortality rate in facilities
+```{r}
+library(ggplot2)
+library(dplyr)
+summary(alldata$mortality_rate_facility)
+# Histogram of Mortality rates 
+alldata %>% ggplot(aes(x=mortality_rate_facility)) + geom_histogram() + 
+  ggtitle("Mortality Rates in facilities")
+
+# Scatterplot of Mortality rate vs readmission rate
+alldata %>% ggplot(aes(x=mortality_rate_facility,y=readmission_rate_facility)) + geom_point()+geom_smooth(method="lm") + ggtitle("Mortality rate vs readmission rate")
+
+# Boxplot of mortality by performance score categories
+ggplot(data = alldata, 
+       aes(x = alldata$perfcats, y = alldata$mortality_rate_facility)) + 
+    geom_boxplot() + xlab("Facility performance score categories") + 
+  ylab("Facility mortality rate")
+# Boxplot of mortality rate by five-star category
+ggplot(data = alldata, 
+       aes(x = alldata$five_star, y = alldata$mortality_rate_facility)) + 
+    geom_boxplot() + xlab("Facility five star rating") + 
+  ylab("Facility mortality rate")
+
+alldata %>% ggplot(aes(x=mortality_rate_facility,y=readmission_rate_facility,color=five_star)) + geom_point() + ggtitle("Mortality rate vs readmission rate")
+
+alldata %>% ggplot(aes(x=mortality_rate_facility,y=readmission_rate_facility,color=chain_owned)) + geom_point() + ggtitle("Mortality rate vs readmission rate") + facet_wrap(~five_star)
+
+# Filtering higher mortality cases
+alldata %>% filter(mortality_rate_facility >= 30) %>% select(chain_owned,network,state)
+alldata %>% filter(mortality_rate_facility >= 30) %>% group_by(chain_owned) %>% summarize(n())
+```
+# CKD prevalence
+```{r}
+# Summary of prevalence of Chronic Kidney Disease within networks
+# Network 10 has highest prevalence
+alldata %>% group_by(network) %>% summarize(meanprev=mean(`avg(DataValue)`)) %>% arrange(desc(meanprev))
+# Plotting prevalence of CKD in networks (no values for network 17-
+# Northern California, Hawaii, Guam, Mariana Islands, and American Samoa- no data
+alldata %>% group_by(network) %>% summarize(meanprev=mean(`avg(DataValue)`)) %>% ggplot(aes(x=network,y= meanprev)) + geom_bar(stat = "identity") + 
+  ggtitle("Mean Chronic Kidney Disease (CKD) prevalence in networks")
+```
+# Facility performance scores
+```{r}
+library(ggplot2)
+library(dplyr)
+# Histogram of total performance score
+alldata %>% ggplot(aes(x=total_performance_score)) + geom_histogram() + ggtitle("Total performance score by star rating") + facet_wrap(~five_star)
+
+# Scatter plots
+alldata %>% ggplot(aes(x=standardized_hospitalization_ratio,y=total_performance_score)) + geom_point()+geom_smooth(method="lm") + ggtitle("Hospitalization rate vs Total perf score")
+
+alldata %>% ggplot(aes(x=readmission_rate_facility,y=total_performance_score)) + geom_point()+geom_smooth(method="lm") + ggtitle("Readmission rate vs Total perf score")
+
+alldata %>% ggplot(aes(x=five_star,y=total_performance_score)) + 
+    geom_boxplot() + xlab("Facility Five Star Rating") + 
+  ylab("Total Performance Score")
+
+alldata %>% ggplot(aes(x=mortality_rate_facility,y=total_performance_score,color=five_star)) + geom_point() + ggtitle("Mortality rate vs total perf score")
+
+alldata %>% group_by(network) %>% summarize(meanscore=mean(total_performance_score,na.rm = TRUE)) %>% arrange(desc(meanscore))
+
+alldata %>% group_by(network) %>% summarize(meanscore=mean(total_performance_score,na.rm = TRUE)) %>% ggplot(aes(x=network,y= meanscore)) + geom_bar(stat = "identity") + 
+  ggtitle("Mean facility performance score in networks")
+```
+# Examining 'poor' performing networks & states
+```{r}
+# Top 10 states with the highest number of 'poor' performing facilities
+alldata %>% filter(perfcats == "Poor") %>% group_by(state) %>% 
+    summarize(total=n()) %>% arrange(desc(total)) %>% head(.,10) %>% ggplot(aes(x=state,y=total)) +
+  geom_bar(stat="identity") + ggtitle("Top 10 states with highest number of poor preformance facilities")
+
+# Top 10 networks with the highest number of 'poor' performing facilities
+
+alldata %>% filter(perfcats == "Poor") %>% group_by(network) %>% 
+    summarize(total=n()) %>% arrange(desc(total)) %>% head(.,10) %>% ggplot(aes(x=network,y=total)) +
+  geom_bar(stat="identity") + ggtitle("Top 10 networks with highest number of poor preformance facilities")
+
+# Fewer facilities with higher mortality & readmission rates in good-very good performance
+alldata %>% ggplot(aes(x=mortality_rate_facility)) + geom_histogram() + facet_wrap(~perfcats) + ggtitle("Mortality Rates by facility performance scores")
+
+
+alldata %>% ggplot(aes(x=readmission_rate_facility)) + geom_histogram() + facet_wrap(~perfcats) + ggtitle("Readmission Rates by facility performance scores")
+
+alldata %>% ggplot(aes(x=mortality_rate_facility,y=standardized_hospitalization_ratio)) + geom_point()+geom_smooth(method="lm") + ggtitle("Mortality rate vs SHR")
+
+alldata %>% ggplot(aes(x=mortality_rate_facility,y=standard_infection_ratio)) + geom_point()+geom_smooth(method="lm") + ggtitle("Mortality rate vs SIR")
+
+alldata %>% ggplot(aes(x=mortality_rate_facility,y=standardized_readmission_ratio)) + geom_point()+geom_smooth(method="lm") + ggtitle("Mortality rate vs SRR")
+
+alldata %>% ggplot(aes(x=mortality_rate_facility,y=standardized_readmission_ratio)) + geom_point()+geom_smooth(method="lm") + facet_wrap(~perfcats) + ggtitle("Mortality rate vs SRR by performance scores")
+```
+# Five star ratings
+```{r}
+# Majority of facilities are 3,4,5 star rated, 698 facilities are 1 or 2 star rated: FL, TX, GA, CA, NY, OH, IL, TN, LA, MI 
+summary(alldata$five_star)
+alldata %>% ggplot(aes(x=five_star)) + geom_bar(aes(fill=perfcats),stat="count")
+star <- c("1","2")
+alldata %>% filter(five_star %in% star) %>% group_by(state) %>% summarize(total=n()) %>% arrange(desc(total)) %>% head(.,10)
+
+alldata %>% filter(perfcats == "Poor") %>% group_by(state) %>% 
+    summarize(total=n()) %>% ggplot(aes(x=state,y=total)) + geom_bar(stat = "identity") + ggtitle("States facilities with poor total performance scores")
+
+# Histogram shows that even though fewer facilities have 1 & 2 star ratings, the mortality in these facilities is much higher (40)
+alldata %>% ggplot(aes(x=mortality_rate_facility)) + geom_histogram() + facet_wrap(~five_star) + ggtitle("Mortality Rates by Star Rating")
+```
+# Patient characteristics
+```{r}
+alldata %>% ggplot(aes(x=dis2y4_f,y=rac2y4_f)) + geom_point()+geom_smooth(method="lm") + ggtitle("AA race vs Hypertension") + facet_wrap(~five_star)
+alldata %>% group_by(network) %>% summarize(AA=mean(rac2y4_f,na.rm = TRUE)) %>% ggplot(aes(x=network,y= AA)) + geom_bar(stat = "identity") + 
+  ggtitle("Percentage of AA patients in networks")
+alldata %>% ggplot(aes(x=dis1y4_f)) + geom_histogram() + ggtitle("Percentage of patients with Diabetes as primary ESRD cause")
+alldata %>% ggplot(aes(x=dis2y4_f)) + geom_histogram() + ggtitle("Percentage of patients with Hypertension as primary ESRD cause")
+alldata %>% ggplot(aes(x=dis3y4_f)) + geom_histogram() + ggtitle("Percentage of patients with Glomerulonephritis as primary ESRD cause")
+alldata %>% ggplot(aes(x=rac2y4_f)) + geom_histogram() + ggtitle("Percentage of AA patients") + facet_wrap(~perfcats)
+alldata %>% group_by(network) %>% summarize(AA=mean(rac4y4_f,na.rm = TRUE)) %>% ggplot(aes(x=network,y= AA)) + geom_bar(stat = "identity") + 
+  ggtitle("Percentage of white patients in networks")
+```
+# Transplants
+```{r}
+summary(alldata$rdsallty4_f)
+alldata %>% group_by(network) %>% summarize(meantx=mean(rdsallty4_f,na.rm = TRUE)) %>% ggplot(aes(x=network,y= meantx)) + geom_bar(stat = "identity") + 
+  ggtitle("Mean kidney transplants in networks")
+alldata %>% ggplot(aes(x=rdsallty4_f)) + geom_histogram() + facet_wrap(~five_star) + ggtitle("Transplants by Star Rating")
+alldata %>% ggplot(aes(x=rdsallty4_f)) + geom_histogram() + facet_wrap(~perfcats) + ggtitle("Transplants by performance score")
+alldata %>% ggplot(aes(x=rdsallty4_f)) + geom_histogram() + facet_wrap(~stations) + ggtitle("Transplants by number of dialysis stations")
+alldata %>% ggplot(aes(x=rdsallty4_f,y=X_of_dialysis_stations)) + geom_point()+geom_smooth(method="lm") + ggtitle("Transplants vs no. of dialysis stations")
+```
+# Mapping
+```{r}
+library(ggmap)
+library(ggplot2)
+usbasemap <- get_map(location = 'United States', zoom= 4, maptype = "terrain", source='google', color='color')
+ggmap(usbasemap)
+```
+# Mapping poor performing facilities
+```{r}
+library(ggmap)
+library(ggplot2)
+# Filter cases with "poor" score
+poorperf <- alldata %>% filter(perfcats == "Poor")
+geopoorperf <- ggmap(usbasemap) + geom_point(aes(x=longitude,y=latitude),data=poorperf, na.rm = T, color="red", alpha=0.3,size=1) + ggtitle("Facilities with lowest performance scores")
+# Filter cases with 1 & 2 star rating
+star <- c(1,2)
+lowstar <- alldata %>% filter(five_star %in% star)
+geolowstar <- ggmap(usbasemap) + geom_point(aes(x=longitude,y=latitude),data=lowstar, na.rm = T, color="blue", alpha=0.3,size=1) + ggtitle("Facilities with 1 & 2 star ratings")
+plot(geopoorperf)
+plot(geolowstar)
+```
+# Geographical distribution of poor performing states
+```{r}
+library(ggmap)
+library(ggplot2)
+# Mapping top 10 poor performance & 1-2 star states
+states <- map_data("state")
+poorstates <- c("florida","texas","georgia","california","new york","ohio","illinois","tennessee","louisiana","michigan","pennsylvania","maryland")
+poorstates1 <- states %>% filter (region %in% poorstates)
+ggmap(usbasemap) + geom_polygon(data = poorstates1, aes(x=long, y=lat, group = group), fill = NA, color = "red") + ggtitle("Top 10 poor performance & 1-2 star rated states")
+
+ggmap(usbasemap) + geom_polygon(data = poorstates1, aes(x=long, y=lat, group = group), fill = "yellow", color = "red")
+```
+# Mapping prevalence
+```{r}
+library(ggmap)
+library(ggplot2)
+prev <- ggmap(usbasemap) + geom_point(aes(x=longitude, y=latitude, color=`avg(DataValue)`), data=alldata, alpha=.5, na.rm = T)  + scale_color_gradient(low="yellow", high="blue") + ggtitle("Chronic Kidney Disease Prevalence in US States")
+plot(prev)
+```
+# Kmeans clustering
+```{r}
+# Create data frame "allfac.num4" with variables for Kmeans cluster analysis
+# Filtering by mortality value outliers based on the distribution of Mortality
+allfac.num4 <- alldata %>% filter(mortality_rate_facility >= 5 & mortality_rate_facility <= 30) %>% select(provider_number,network,chain_owned,five_star,perfcats, mortality_rate_facility,readmission_rate_facility, strr_measure_score,standardized_hospitalization_ratio, standardized_readmission_ratio,total_performance_score, nhsn_bsi_measure_score,anemia_management_measure_score,  kt_v_dialysis_adequacy_combined_measure_score,  vascular_access_combined_measure_score, mineral_metabolism_measure_score,X_of_dialysis_stations) %>% filter(complete.cases(.)) 
+
+allfacnum4 <- allfac.num4 %>% select_if(is.numeric)
+scaled.allfac <- scale(allfacnum4)
+
+# Create a list 'kvalue' to store results of each kmeans cluster algorithm model
+kvalue <- list()
+for(i in 1:8){
+  kvalue[[i]] <- kmeans(scaled.allfac,i)
+}
+
+# Calculating ratio between sum of squares and total sum of squares
+bss_totss <- list()
+for (i in 1:8){
+  bss_totss[[i]] <- kvalue[[i]]$betweenss/kvalue[[i]]$totss
+}
+# Check the "elbow" plot
+plot(1:8,type="b",bss_totss)
+
+# Scatterplots & centroids for mortality vs readmission rates by cluster
+for (i in 1:8){
+  plot(allfacnum4$mortality_rate_facility,allfacnum4$total_performance_score,
+       col=kvalue[[i]]$cluster)
+       points(kvalue[[i]]$centers[,c(1,2)],col=1:8,pch=23,cex=4)
+}
+
+# Examining 5 clusters
+clustnum <- factor(kvalue[[5]]$cluster)
+allfac.num4$clust <- clustnum
+allfac.num4 %>% ggplot(aes(x=total_performance_score)) + geom_histogram() + 
+ggtitle("Total performance score by clusters") + facet_wrap(~clust)
+
+# Examining 4 clusters
+clustnum <- factor(kvalue[[4]]$cluster)
+allfac.num4$clust <- clustnum
+allfac.num4 %>% ggplot(aes(x=mortality_rate_facility)) + geom_histogram() + 
+  ggtitle("Mortality rates by clusters") + facet_wrap(~clust)
+
+
+ggplot(allfac.num4,aes(allfac.num4,x=allfac.num4$mortality_rate_facility,
+                     y=allfac.num4$readmission_rate_facility,
+                     color=allfac.num4$clust)) + geom_point() + facet_wrap(~allfac.num4$perfcats)
+
+# Using best cluster estimate for 3 clusters
+clustnum <- factor(kvalue[[3]]$cluster)
+allfac.num4$clust <- clustnum
+allfac.num4 %>% ggplot(aes(x=standardized_hospitalization_ratio)) + geom_histogram() + 
+ggtitle("Standardized hospitalization ratio by 3 clusters") + facet_wrap(~clust)
+
+plot(allfacnum4$mortality_rate_facility,allfac.num4$readmission_rate_facility,
+     col=kvalue[[3]]$cluster,pch=19)
+
+# Using best cluster estimate for 7 clusters
+clustnum <- factor(kvalue[[7]]$cluster)
+allfac.num4$clust <- clustnum
+allfac.num4 %>% ggplot(aes(x=standardized_hospitalization_ratio)) + geom_histogram() + 
+ggtitle("Standardized hospitalization ratio by 7 clusters") + facet_wrap(~clust)
+
+```
+# Heirarchical clustering
+```{r}
+library(NbClust)
+library(mclust)
+# Use scaled dataset from above
+dist.allfac <- dist(scaled.allfac)
+allfac.clust <- hclust(dist.allfac,method="complete")
+plot(allfac.clust,cex=0.1)
+rect.hclust(allfac.clust, k=5, border="red")
+```
+
+```{r}
+# Checking the groupings for 2-5 clusters
+g45 <- cutree(allfac.clust, k = c(4,5))
+table(grp4 = g45[,"4"], grp5 = g45[,"5"])
+# clusters 2 thru 5
+g23 <- cutree(allfac.clust,k=c(2,3))
+table(grp2 = g23[,"2"], grp3 = g23[,"3"])
+```
+```{r}
+library(ggplot2)
+allfac_5 <- cutree(allfac.clust,5)
+clust_labs <- factor(allfac_5)
+allfac.num4$hlabs <- clust_labs
+allfac.num4 %>% ggplot(aes(x=total_performance_score)) + geom_histogram() + 
+ggtitle("Total performance score by clusters") + facet_wrap(~hlabs)
+
+# Check the fit
+table(allfac.num4$five_star,allfac.num4$hlabs)
+```
+# Using R packages NbClust to predict number of clusters
+```{r}
+library(NbClust)
+res2 <- NbClust(scaled.allfac,distance="euclidean",min.nc=2,
+                max.nc=8,method="complete",index="all")
+```
+# Package mclust
+```{r}
+library(mclust)
+allfac.mclust <- Mclust(scaled.allfac)
+allfac.mclust
+#'Mclust' model object:best model: ellipsoidal, equal volume and 
+# shape (EEV) with 7 components
+```
+# Regression analysis
+```{r}
+library(dplyr)
+# Create data frame "allfac.mod1" with variables for regression analysis
+allfac.mod1 <- alldata %>% filter(mortality_rate_facility >= 5 & mortality_rate_facility <= 30) %>% select(provider_number,network,chain_owned,five_star,perfcats, mortality_rate_facility,readmission_rate_facility, strr_measure_score,standardized_hospitalization_ratio, standardized_readmission_ratio,total_performance_score, nhsn_bsi_measure_score,anemia_management_measure_score, kt_v_dialysis_adequacy_combined_measure_score,vascular_access_combined_measure_score,mineral_metabolism_measure_score,X_of_dialysis_stations,  rdsallty4_f,`avg(DataValue)`,rac1y4_f,rac2y4_f,rac3y4_f,rac4y4_f,rac5y4_f,eth1y4_f,eth2y4_f,eth3y4_f,dis1y4_f,dis2y4_f,dis3y4_f,dis4y4_f,rdsallty4_f)                                                                              
+# Selecting complete numeric cases
+allfacnum5 <- allfac.mod1 %>% filter(complete.cases(.)) %>% select_if(is.numeric)
+```
+# Correlations
+```{r}
+library(corrplot)
+cor.allfacrates <- cor(allfacnum5)
+corrplot(cor.allfacrates,tl.cex=0.5)
+```
+# Calculating correlations
+```{r}
+library(dplyr)
+# Function 'corfun' to calculate correlations
+# Inputs: df=dataframe, a=variable1, b=variable2
+corfun <- function(df=allfacnum5,a,b){df %>% summarize(N=n(),r=cor(a,b))}
+
+# Checking correlations with mortality rate
+corfun(a=allfacnum5$mortality_rate_facility,b=allfacnum5$standardized_readmission_ratio)
+corfun(a=allfacnum5$mortality_rate_facility,b=allfacnum5$standardized_hospitalization_ratio)
+corfun(a=allfacnum5$strr_measure_score,b=allfacnum5$mortality_rate_facility)
+# Correlations with Mortality are very low, checking steps function output 
+allfac.MR <- lm(mortality_rate_facility~.,data=allfacnum5)
+steps.MR <- step(allfac.MR,direction="backward",data=allfacnum5)
+summary(steps.MR)
+# add leaps
+library(leaps)
+leaps <- regsubsets(mortality_rate_facility~.,data=allfacnum5)
+leaps
+plot(leaps,scale="r2")
+```
+# Creating scatterplots 
+```{r}
+library(ggplot2)
+allfacnum5 %>% ggplot(aes(x = total_performance_score, y = readmission_rate_facility)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE)
+
+allfacnum5 %>% ggplot(aes(x = total_performance_score, y = standardized_hospitalization_ratio)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE) 
+
+```
+# Modelling total performance scores
+```{r}
+# Consult plot to idenitfy variables related to total performance score
+corfun(a=allfacnum5$total_performance_score,b=allfacnum5$readmission_rate_facility)
+# Model 1: Creating a model for total performance score as dependent variabe, readmission rate as a predictor
+mod1 <- lm(total_performance_score ~ readmission_rate_facility, data=allfacnum5)
+summary(mod1)
+```
+```{r}
+# Model 2: Adding Transfusion score to model 1
+corfun(a=allfacnum5$total_performance_score,b=allfacnum5$strr_measure_score)
+mod2 <- lm(total_performance_score ~ readmission_rate_facility + strr_measure_score, data=allfacnum5)
+summary(mod2)
+```
+```{r}
+# Model 3: Adding Infection measure score
+corfun(a=allfacnum5$total_performance_score,b=allfacnum5$nhsn_bsi_measure_score)
+mod3 <- lm(total_performance_score ~ readmission_rate_facility + strr_measure_score + nhsn_bsi_measure_score, data=allfacnum5)
+summary(mod3)
+```
+```{r}
+# Model 4: Adding dialysis adequacy measure score
+mod4 <- lm(total_performance_score ~ readmission_rate_facility + strr_measure_score + nhsn_bsi_measure_score + kt_v_dialysis_adequacy_combined_measure_score, data=allfacnum5)
+summary(mod4)
+```
+```{r}
+# Model 5: Adding vascular access score
+mod5 <- lm(total_performance_score ~ readmission_rate_facility + strr_measure_score + nhsn_bsi_measure_score + kt_v_dialysis_adequacy_combined_measure_score + vascular_access_combined_measure_score, data=allfacnum5)
+summary(mod5)
+```
+```{r}
+#Model 6: Adding standardized hospitalization ratio
+mod6 <- lm(total_performance_score ~ readmission_rate_facility + strr_measure_score + nhsn_bsi_measure_score + kt_v_dialysis_adequacy_combined_measure_score + vascular_access_combined_measure_score + standardized_hospitalization_ratio, data=allfacnum5)
+summary(mod6) 
+```
+```{r}
+# Regression plots 
+hist(mod6$residuals)
+qqnorm(mod6$residuals)
+qqline(mod6$residuals)
+plot(mod6$fitted.values,mod6$residuals)
+```
+# Modeling total performance score by using lm and steps
+```{r}
+psmodel <- lm(total_performance_score ~ .,data=allfacnum5)
+steps.PS <- step(psmodel,direction="backward",data=allfacnum5)
+summary(steps.PS)
+```
+# Sentiment Analysis: Rvest and tidytext
+```{r}
+library(rvest)
+library(tidytext)
+library(dplyr)
+# Dialysis support groups text analysis using tidytext
+# Discussion forum on Kidney failure and Chronic Kidney Disease
+url <- "https://patient.info/forums/discuss/browse/kidney-failure-and-ckd-1300#"
+webtext <- read_html(url) %>% 
+  html_nodes(xpath='//*[(@id = "group-discussions")]//p') %>% html_text()
+
+# Create data frame with 35 rows based on text file
+text_df <- data_frame(line = 1:35, text = webtext)
+# use "unnest tokens function"
+tidyforum <- text_df %>% unnest_tokens(word,text)
+# load stopwords data
+data("stop_words")
+# remove stopwords
+tidyforum <- tidyforum %>% anti_join(stop_words)
+tidyforum %>% count(word, sort = TRUE)
+# load sentiments data
+data("sentiments")
+forumsentiment <- tidyforum %>% inner_join(get_sentiments("bing"))
+forumsentiment %>% count(sentiment)
+webtext[1:3]
+```
+# Sentiment analysis: Package Rtimes
+```{r}
+library(rtimes)
+library(tm)
+library(wordcloud)
+library(SentimentAnalysis)
+
+Sys.setenv(NYTIMES_AS_KEY = "1f3c87aaf52e46129e7525843d872aae")
+articles <- as_search("dialysis",begin_date = 20150101,end_date = 20180401, fl = c('web_url','headline','snippet'),all_results = TRUE)
+
+snippetlist <- list(articles$data$snippet)
+snippetlist_text <-  sapply(snippetlist,function(x) gettext(x))
+
+Corpus(VectorSource(snippetlist_text))
+dia_articles <- Corpus(VectorSource(snippetlist_text))
+inspect(dia_articles[1])
+dia_articles <- tm_map(dia_articles,stripWhitespace)
+dia_articles <- tm_map(dia_articles,removeNumbers)
+dia_articles <- tm_map(dia_articles,content_transformer(tolower))
+dia_articles <- tm_map(dia_articles,removeWords,stopwords("en"))
+dia_articles_clean <- tm_map(dia_articles,removePunctuation)
+
+library(wordcloud)
+wordcloud(dia_articles_clean)
+wordcloud(dia_articles_clean,scale = c(2,0.5),colors = rainbow(50))
+dia_articles_tdm <- TermDocumentMatrix(dia_articles_clean)
+dia_articles_tdm1 <- dia_articles_tdm
+dia_articles_tdm_m <- as.matrix(dia_articles_tdm)
+dia_articles_freq <- rowSums(dia_articles_tdm_m)
+diaterms_freq_sorted <- sort(dia_articles_freq,decreasing=T)
+article_sent <- analyzeSentiment(dia_articles_tdm1)
+str(article_sent)
+binaryvalues <- convertToBinaryResponse(article_sent$SentimentQDAP)
+(binary <- table(binaryvalues))
+grep("positive",binaryvalues)[1:20]
+snippetlist_text[c(16,20,30)]
+```
+# Sentiment Analysis: Package Rtweet
+```{r}
+# Load libraries
+library(rtweet)
+library(tm)
+library(SentimentAnalysis)
+library(wordcloud)
+
+# searching for tweets in "poor" performing states
+dia <- search_tweets("Dialysis",lang="en",n = 5000,retryonratelimit = TRUE,geocode = lookup_coords("fl","tx","ca","ga","ny"))
+dia1 <- plain_tweets(dia$text)
+dia1 [1:20]
+dia_rawtweets <- dia1
+diacleaned_tweets_vec <- VectorSource(dia_rawtweets)
+diacleaned_tweets_corp <- VCorpus(diacleaned_tweets_vec)
+
+dia_stopwords <- c(stopwords("english"),"dialysis","patent","kidney","gtgtgt","job","careerarc")
+# function tm cleaner from notes
+tm_cleaner <- function(corpus, stop=dia_stopwords, rm_num=TRUE) {
+  require(tm)
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus <- tm_map(corpus, removeNumbers)
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords, stop)
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, 
+                   content_transformer(function(x) gsub("http\\w+", "", x)))
+  return(corpus)
+}
+diacleaned_tweets_corp <- tm_cleaner(diacleaned_tweets_corp,stop=dia_stopwords)
+diacleaned_tweets_tdm <- TermDocumentMatrix(diacleaned_tweets_corp)
+dialysis_cleaned_tweets_tdm <- diacleaned_tweets_tdm
+diacleaned_tweets_tdm_m <- as.matrix(diacleaned_tweets_tdm)
+diaterms_freq <- rowSums(diacleaned_tweets_tdm_m)
+diaterms_freq_sorted <- sort(diaterms_freq,decreasing=T)
+diaterms_freq_sorted[1:10]
+diadf <- data.frame(word=names(diaterms_freq_sorted),
+                    freq=diaterms_freq_sorted,stringsAsFactors = FALSE)
+
+# Create wordcloud
+wordcloud(diadf$word,diadf$freq,scale = c(2,0.5),colors = rainbow(50))
+# perform sentiment analysis
+diatweetsentiment <- analyzeSentiment(diacleaned_tweets_tdm)
+binaryvalues <- convertToBinaryResponse(diatweetsentiment$SentimentQDAP)
+(binary <- table(binaryvalues))
+grep("positive",binaryvalues)[1:15]
+dia1[c(3,10,19)]
+```
+# Patient Utility Function
+```{r}
+
+c <- c("10461")
+facinfo <- function (c) {
+#
+# FUNCTION TO PROVIDE FACILITY ADDRESS, RATING INFORMATION & MAP 
+#  
+# INPUTS: 
+#
+# C - Character vector with one or more zipcode values
+# 
+# OUTPUTS: A dataframe with facility address, network, and patient rating
+# Load libraries
+library(dplyr)
+library(leaflet)
+# Create empty list 'infolist'
+infolist <-list()
+# Create dataframe 'tmpzip' with filtered data corresponding to 'c'zip code values 
+tmpzip <- alldata %>% filter(zip %in% c)
+# For loop to perform functions on each row value of tmpzip
+for (row in 1:nrow(tmpzip)){
+# Create & populate 'infolist' elements from corresponding 'tmpzip' elements
+  
+infolist$Name <- tmpzip$facility_name
+infolist$Address <- tmpzip$address_line_1
+infolist$City <- tmpzip$city
+infolist$State <- tmpzip$state
+#infolist$Contact <- tmpzip$Pho
+infolist$Network <- tmpzip$network
+infolist$Rating <- tmpzip$facrating
+infolist$Score <- tmpzip$perfcats}
+# Create 'listout' with Adress, phone, Network, Rating, Score information for each facility
+listout <- list(Address=paste(infolist$Name,infolist$Address,infolist$City,infolist$State,sep=","),
+                Network=infolist$Network,
+                "Patient Rating"=infolist$Rating,
+                "Performance Score"=infolist$Score)
+# Create output 'retdf' dataframe from 'listout' elements 
+retdf <- data.frame (listout)
+# Create Leaflet map 'locations' by using lat-long values for each facility
+locations <- leaflet(tmpzip) %>% addTiles() %>% 
+    addMarkers(~longitude,~latitude, popup=~facility_name,
+               clusterOptions=markerClusterOptions())
+# Create & populate final output list 'facinfoloc' elements with 'retdf' and 'locations'
+facinfoloc <- list("Facility Information"=retdf,Map=locations)
+# Provide dataframe and map outputs
+return(facinfoloc)
+}
+```
+```{r}
+facinfo(c)
+```
+
+```
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
